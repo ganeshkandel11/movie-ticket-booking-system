@@ -1,0 +1,2182 @@
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include <ctype.h>
+
+#ifdef _WIN32
+    #include <conio.h>
+#else
+    #include <unistd.h>
+    #include <termios.h>
+#endif
+
+/* ==================== CONSTANTS ==================== */
+#define MAX_SEATS 10
+#define MAX_CUSTOMERS 100
+#define MAX_NAME_LEN 50
+#define MAX_MOVIES 100
+#define MAX_BOOKINGS 1000
+#define MAX_SHOWS 5
+#define MAX_DAYS 30
+#define FILE_NAME "Movie.dat"
+#define TICKET_FILE "Tickets.dat"
+#define MAX_LOGIN_ATTEMPTS 3
+
+/* ==================== LOGIN CREDENTIALS ==================== */
+/* Admin Panel Credentials */
+#define ADMIN_USERNAME "admin"
+#define ADMIN_PASSWORD "Admin@123"
+
+/* User Panel Credentials */
+#define USER_USERNAME "user"
+#define USER_PASSWORD "User@123"
+
+/* ==================== DATA FILE VERSIONING ==================== */
+#define DATA_FILE_MAGIC 0x4D545342   /* arbitrary 4-byte signature ("MTSB") */
+#define MOVIE_DATA_VERSION 1
+#define BOOKING_DATA_VERSION 2
+
+/* ==================== SHOW TIME CONSTANTS ==================== */
+/* Show start times in minutes from midnight */
+#define SHOW1_START 540   /* 09:00 AM = 9 * 60 */
+#define SHOW2_START 720   /* 12:00 PM = 12 * 60 */
+#define SHOW3_START 900   /* 03:00 PM = 15 * 60 */
+#define SHOW4_START 1080  /* 06:00 PM = 18 * 60 */
+#define SHOW5_START 1260  /* 09:00 PM = 21 * 60 */
+#define BOOKING_CUTOFF_MINUTES 15  /* Minutes before show start to stop booking */
+
+typedef struct {
+    int magic;
+    int version;
+} DataFileHeader;
+
+/* ==================== STRUCTURES ==================== */
+
+typedef struct {
+    int seat[MAX_SEATS][MAX_SEATS];          // 0=available, 1=booked
+    char customername[MAX_CUSTOMERS][MAX_NAME_LEN];
+    int basic;                                // Number of basic seats booked
+    int mid;                                  // Number of mid seats booked
+    int special;                              // Number of special seats booked
+    int moviestatus;                          // 1=active, 0=deleted
+    int moviecode;
+    int year, month, day;                     // Show date
+    int show;                                 // Show number (1-5)
+    float priceBasic;
+    float priceMid;
+    float priceSpecial;
+    int totalSeats;
+    int bookedSeats;
+    int duration;                             // Movie duration in minutes
+    char genre[30];                           // Movie genre
+    char moviename[MAX_NAME_LEN];
+    int showID;                               // Unique ID for each show
+} Movie;
+
+typedef struct {
+    int bookingID;
+    int transactionID;                        // Groups tickets bought together in one visit
+    int movieCode;
+    int show;
+    int showID;                               // Unique show ID
+    char customerName[MAX_NAME_LEN];
+    int seatRow;
+    int seatCol;
+    int seatType;                             // 1=Basic, 2=Mid, 3=Special
+    float price;
+    char bookingDate[30];                     // When booking was made
+    char showDate[20];                        // Date of the show
+    char showTime[20];                        // Show time string
+    char movieName[MAX_NAME_LEN];             // Movie name at time of booking
+    int isCanceled;                           // 0=active, 1=canceled
+} Booking;
+
+/* ==================== FUNCTION PROTOTYPES ==================== */
+
+/* Menu Functions */
+void displayMainMenu(void);
+void displayAdminMenu(void);
+void displayUserMenu(void);
+
+/* Authentication Functions */
+void getHiddenInput(char *buffer, int maxLen);
+int adminLogin(void);
+int userLogin(void);
+
+/* Date & Time Functions */
+void getCurrentDate(char *dateStr);
+void getCurrentDateTime(char *dateTimeStr);
+int isDateValid(int year, int month, int day);
+int isDateInPast(int year, int month, int day);
+int isDateToday(int year, int month, int day);
+int getShowStartMinutes(int show);
+int isBookingAllowed(Movie *m);
+char* getBookingBlockReason(Movie *m, char *buffer, int bufferSize);
+void displayAvailableDates(void);
+void getDateFromUser(int *year, int *month, int *day);
+
+/* Show Management */
+void displayShowTimings(void);
+void getShowTime(int show, char *timeStr);
+const char* getShowName(int show);
+int generateShowID(int movieCode, int year, int month, int day, int show);
+int isShowDuplicate(int movieCode, int year, int month, int day, int show, Movie movies[], int count);
+void displayMovieShows(Movie movies[], int count, int movieCode);
+
+/* Movie Management */
+void addNewMovie(void);
+void displayAllMovies(void);
+void updateMovie(void);
+void deleteMovie(void);
+void displayMovieDetails(Movie *m);
+void displayMovieSchedule(void);
+void displayMoviesByDate(void);
+
+/* Ticket Booking */
+void bookTicket(void);
+void cancelTicket(void);
+void displayBookingHistory(void);
+void displayMyBookings(void);
+void displaySeatLayout(Movie *m);
+
+/* File Operations */
+int ensureMovieFileHeader(void);
+int ensureBookingFileHeader(void);
+void loadMovies(Movie movies[], int *count);
+void saveMovies(Movie movies[], int count);
+void loadBookings(Booking bookings[], int *count);
+void loadAllBookings(Booking bookings[], int *count);
+void saveBooking(Booking *b);
+void updateBookingFile(Booking bookings[], int count);
+
+/* Utility Functions */
+void initializeMovie(Movie *m);
+void inputMovieCode(Movie *m);
+void inputMovieData(Movie *m);
+int isMovieCodeDuplicate(int movieCode);
+int getMovieIndex(int movieCode, Movie movies[], int count);
+int getNextBookingID(void);
+void generateBookingID(Booking *b);
+void clearScreen(void);
+void pressAnyKey(void);
+int getValidInt(int min, int max);
+float getValidFloat(float min, float max);
+void displayHeader(const char *title);
+
+/* ==================== IMPLEMENTATION ==================== */
+
+/* ---------- DATE & TIME FUNCTIONS ---------- */
+
+void getCurrentDate(char *dateStr) {
+    time_t t = time(NULL);
+    struct tm *now = localtime(&t);
+    sprintf(dateStr, "%04d-%02d-%02d", 
+            now->tm_year + 1900, now->tm_mon + 1, now->tm_mday);
+}
+
+void getCurrentDateTime(char *dateTimeStr) {
+    time_t t = time(NULL);
+    struct tm *now = localtime(&t);
+    sprintf(dateTimeStr, "%04d-%02d-%02d %02d:%02d:%02d", 
+            now->tm_year + 1900, now->tm_mon + 1, now->tm_mday,
+            now->tm_hour, now->tm_min, now->tm_sec);
+}
+
+int isDateValid(int year, int month, int day) {
+    if (year < 2024 || month < 1 || month > 12 || day < 1) return 0;
+    
+    int daysInMonth[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    
+    // Check for leap year
+    if ((year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)) {
+        daysInMonth[1] = 29;
+    }
+    
+    return day <= daysInMonth[month - 1];
+}
+
+int isDateInPast(int year, int month, int day) {
+    time_t t = time(NULL);
+    struct tm *now = localtime(&t);
+    
+    if (year < now->tm_year + 1900) return 1;
+    if (year > now->tm_year + 1900) return 0;
+    if (month < now->tm_mon + 1) return 1;
+    if (month > now->tm_mon + 1) return 0;
+    return day < now->tm_mday;
+}
+
+int isDateToday(int year, int month, int day) {
+    time_t t = time(NULL);
+    struct tm *now = localtime(&t);
+    return (year == now->tm_year + 1900 && 
+            month == now->tm_mon + 1 && 
+            day == now->tm_mday);
+}
+
+int getShowStartMinutes(int show) {
+    switch(show) {
+        case 1: return SHOW1_START;
+        case 2: return SHOW2_START;
+        case 3: return SHOW3_START;
+        case 4: return SHOW4_START;
+        case 5: return SHOW5_START;
+        default: return -1;
+    }
+}
+
+int isBookingAllowed(Movie *m) {
+    if (m == NULL) return 0;
+    
+    // Check if show date is in the past
+    if (isDateInPast(m->year, m->month, m->day)) {
+        return 0;
+    }
+    
+    // If show is today, check time
+    if (isDateToday(m->year, m->month, m->day)) {
+        time_t t = time(NULL);
+        struct tm *now = localtime(&t);
+        int currentMinutes = now->tm_hour * 60 + now->tm_min;
+        int showStartMinutes = getShowStartMinutes(m->show);
+        
+        // Show hasn't started yet - booking allowed
+        if (currentMinutes < showStartMinutes - BOOKING_CUTOFF_MINUTES) {
+            return 1;
+        }
+        // Within cutoff period or show has started - booking not allowed
+        return 0;
+    }
+    
+    // Future date - booking allowed
+    return 1;
+}
+
+char* getBookingBlockReason(Movie *m, char *buffer, int bufferSize) {
+    if (m == NULL) {
+        snprintf(buffer, bufferSize, "Invalid movie data");
+        return buffer;
+    }
+    
+    if (isDateInPast(m->year, m->month, m->day)) {
+        snprintf(buffer, bufferSize, "This show has already passed (Date: %04d-%02d-%02d)",
+                 m->year, m->month, m->day);
+        return buffer;
+    }
+    
+    if (isDateToday(m->year, m->month, m->day)) {
+        time_t t = time(NULL);
+        struct tm *now = localtime(&t);
+        int currentMinutes = now->tm_hour * 60 + now->tm_min;
+        int showStartMinutes = getShowStartMinutes(m->show);
+        char timeStr[20];
+        getShowTime(m->show, timeStr);
+        
+        if (currentMinutes >= showStartMinutes) {
+            snprintf(buffer, bufferSize, "Show has already started at %s", timeStr);
+            return buffer;
+        }
+        
+        if (currentMinutes >= showStartMinutes - BOOKING_CUTOFF_MINUTES) {
+            int minutesLeft = (showStartMinutes - BOOKING_CUTOFF_MINUTES) - currentMinutes;
+            if (minutesLeft <= 0) {
+                snprintf(buffer, bufferSize, "Booking closed. Show starts at %s (cutoff %d min before)",
+                         timeStr, BOOKING_CUTOFF_MINUTES);
+            } else {
+                snprintf(buffer, bufferSize, "Booking closes in %d minutes. Show starts at %s",
+                         minutesLeft, timeStr);
+            }
+            return buffer;
+        }
+    }
+    
+    snprintf(buffer, bufferSize, "Booking allowed");
+    return buffer;
+}
+
+void displayAvailableDates(void) {
+    printf("\n+------------------------------------------------+\n");
+    printf("| AVAILABLE SHOW DATES                          |\n");
+    printf("+------------------------------------------------|\n");
+    
+    time_t t = time(NULL);
+    struct tm *now = localtime(&t);
+    int currentYear = now->tm_year + 1900;
+    int currentMonth = now->tm_mon + 1;
+    int currentDay = now->tm_mday;
+    
+    printf("| Date       | Day        | Status              |\n");
+    printf("+------------+------------+---------------------|\n");
+    
+    // Show next 7 days
+    int i;
+    for (i = 0; i < 7; i++) {
+        int year = currentYear;
+        int month = currentMonth;
+        int day = currentDay + i;
+        
+        // Adjust month/year if needed
+        while (day > 31) {
+            day -= 31;
+            month++;
+            if (month > 12) {
+                month = 1;
+                year++;
+            }
+        }
+        
+        // Get day of week
+        struct tm date;
+        memset(&date, 0, sizeof(date));
+        date.tm_year = year - 1900;
+        date.tm_mon = month - 1;
+        date.tm_mday = day;
+        mktime(&date);
+        
+        const char *days[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+        
+        printf("| %04d-%02d-%02d | %-10s | %-19s |\n", 
+               year, month, day, days[date.tm_wday], "Available");
+    }
+    printf("+-----------------------------------------------+\n");
+}
+
+void getDateFromUser(int *year, int *month, int *day) {
+    printf("\nEnter Show Date:\n");
+    printf("Year (YYYY): ");
+    while (scanf("%d", year) != 1 || *year < 2024) {
+        printf("Invalid year! Enter a valid year (>= 2024): ");
+        while (getchar() != '\n');
+    }
+    
+    printf("Month (1-12): ");
+    *month = getValidInt(1, 12);
+    
+    printf("Day (1-31): ");
+    *day = getValidInt(1, 31);
+    
+    while (!isDateValid(*year, *month, *day)) {
+        printf("Invalid date! Please enter a valid date.\n");
+        printf("Year (YYYY): ");
+        while (scanf("%d", year) != 1 || *year < 2024) {
+            printf("Invalid year! Enter a valid year (>= 2024): ");
+            while (getchar() != '\n');
+        }
+        printf("Month (1-12): ");
+        *month = getValidInt(1, 12);
+        printf("Day (1-31): ");
+        *day = getValidInt(1, 31);
+    }
+}
+
+/* ---------- SHOW MANAGEMENT FUNCTIONS ---------- */
+
+const char* getShowName(int show) {
+    switch(show) {
+        case 1: return "Morning Show";
+        case 2: return "Matinee Show";
+        case 3: return "Afternoon Show";
+        case 4: return "Evening Show";
+        case 5: return "Night Show";
+        default: return "Unknown Show";
+    }
+}
+
+void getShowTime(int show, char *timeStr) {
+    switch(show) {
+        case 1: strcpy(timeStr, "09:00 AM"); break;
+        case 2: strcpy(timeStr, "12:00 PM"); break;
+        case 3: strcpy(timeStr, "03:00 PM"); break;
+        case 4: strcpy(timeStr, "06:00 PM"); break;
+        case 5: strcpy(timeStr, "09:00 PM"); break;
+        default: strcpy(timeStr, "Unknown");
+    }
+}
+
+int generateShowID(int movieCode, int year, int month, int day, int show) {
+    return (movieCode * 100000) + (year * 10000) + (month * 100) + (day * 10) + show;
+}
+
+int isShowDuplicate(int movieCode, int year, int month, int day, int show, Movie movies[], int count) {
+    int i;
+    for (i = 0; i < count; i++) {
+        if (movies[i].moviecode == movieCode &&
+            movies[i].year == year &&
+            movies[i].month == month &&
+            movies[i].day == day &&
+            movies[i].show == show &&
+            movies[i].moviestatus == 1) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+void displayShowTimings(void) {
+    printf("\n+------------------------------------------------+\n");
+    printf("| SHOW TIMINGS                                  |\n");
+    printf("+----------------------------------------------|\n");
+    printf("| #  | Show Name           | Time              |\n");
+    printf("+----+---------------------+-------------------|\n");
+    int i;
+    for (i = 1; i <= MAX_SHOWS; i++) {
+        char timeStr[20];
+        getShowTime(i, timeStr);
+        printf("| %-2d | %-19s | %-17s |\n", i, getShowName(i), timeStr);
+    }
+    printf("+----------------------------------------------+\n");
+}
+
+void displayMovieShows(Movie movies[], int count, int movieCode) {
+    int found = 0;
+    printf("\n+----------------------------------------------------------------------------------------------+\n");
+    printf("| #  | Movie Name          | Show       | Time       | Date       | Available | Status          |\n");
+    printf("+----+---------------------+------------+------------+------------+-----------+-----------------|\n");
+    
+    int i;
+    for (i = 0; i < count; i++) {
+        if (movies[i].moviecode == movieCode && movies[i].moviestatus == 1) {
+            char timeStr[20];
+            char dateStr[20];
+            char status[20];
+            getShowTime(movies[i].show, timeStr);
+            sprintf(dateStr, "%04d-%02d-%02d", movies[i].year, movies[i].month, movies[i].day);
+            
+            if (isBookingAllowed(&movies[i])) {
+                strcpy(status, "Available");
+            } else {
+                strcpy(status, "Closed");
+            }
+            
+            printf("| %-2d | %-19s | %-10s | %-10s | %-10s | %-9d | %-15s |\n",
+                   found + 1, movies[i].moviename, getShowName(movies[i].show),
+                   timeStr, dateStr, movies[i].totalSeats - movies[i].bookedSeats, status);
+            found++;
+        }
+    }
+    
+    if (found == 0) {
+        printf("| No shows found for this movie.                                                       |\n");
+    }
+    printf("+----------------------------------------------------------------------------------------------+\n");
+}
+
+/* ---------- UTILITY FUNCTIONS ---------- */
+
+void clearScreen(void) {
+#ifdef _WIN32
+    system("cls");
+#else
+    system("clear");
+#endif
+}
+
+void pressAnyKey(void) {
+    printf("\nPress Enter to continue...");
+    while (getchar() != '\n');
+    getchar();
+}
+
+int getValidInt(int min, int max) {
+    int value;
+    char buffer[100];
+    
+    while (1) {
+        if (fgets(buffer, sizeof(buffer), stdin) != NULL) {
+            if (sscanf(buffer, "%d", &value) == 1) {
+                if (value >= min && value <= max) {
+                    return value;
+                }
+            }
+        }
+        printf("Invalid input! Please enter between %d and %d: ", min, max);
+    }
+}
+
+float getValidFloat(float min, float max) {
+    float value;
+    char buffer[100];
+    
+    while (1) {
+        if (fgets(buffer, sizeof(buffer), stdin) != NULL) {
+            if (sscanf(buffer, "%f", &value) == 1) {
+                if (value >= min && value <= max) {
+                    return value;
+                }
+            }
+        }
+        printf("Invalid input! Please enter between %.2f and %.2f: ", min, max);
+    }
+}
+
+void displayHeader(const char *title) {
+    printf("\n+---------------------------------------------------+\n");
+    printf("| %-47s |\n", title);
+    printf("+---------------------------------------------------+\n\n");
+}
+
+/* ---------- AUTHENTICATION FUNCTIONS ---------- */
+
+void getHiddenInput(char *buffer, int maxLen) {
+    int i = 0;
+    int ch;
+
+#ifdef _WIN32
+    while (1) {
+        ch = _getch();
+        if (ch == '\r' || ch == '\n') {
+            break;
+        } else if (ch == '\b') {
+            if (i > 0) {
+                i--;
+                printf("\b \b");
+            }
+        } else if (i < maxLen - 1 && ch >= 32 && ch <= 126) {
+            buffer[i++] = (char)ch;
+            printf("*");
+        }
+    }
+#else
+    struct termios oldAttr, newAttr;
+    tcgetattr(STDIN_FILENO, &oldAttr);
+    newAttr = oldAttr;
+    newAttr.c_lflag &= ~(ICANON | ECHO);
+    tcsetattr(STDIN_FILENO, TCSANOW, &newAttr);
+
+    while (1) {
+        ch = getchar();
+        if (ch == '\n' || ch == '\r' || ch == EOF) {
+            break;
+        } else if (ch == 127 || ch == '\b') {
+            if (i > 0) {
+                i--;
+                printf("\b \b");
+                fflush(stdout);
+            }
+        } else if (i < maxLen - 1 && ch >= 32 && ch <= 126) {
+            buffer[i++] = (char)ch;
+            printf("*");
+            fflush(stdout);
+        }
+    }
+
+    tcsetattr(STDIN_FILENO, TCSANOW, &oldAttr);
+#endif
+
+    buffer[i] = '\0';
+    printf("\n");
+}
+
+int adminLogin(void) {
+    char username[MAX_NAME_LEN];
+    char password[MAX_NAME_LEN];
+    int attempts = MAX_LOGIN_ATTEMPTS;
+
+    while (attempts > 0) {
+        clearScreen();
+        displayHeader("ADMIN PANEL LOGIN");
+
+        printf("Username: ");
+        if (scanf(" %49[^\n]", username) != 1) {
+            while (getchar() != '\n');
+            continue;
+        }
+        while (getchar() != '\n');
+
+        printf("Password: ");
+        getHiddenInput(password, MAX_NAME_LEN);
+
+        if (strcmp(username, ADMIN_USERNAME) == 0 && strcmp(password, ADMIN_PASSWORD) == 0) {
+            printf("\nLogin successful! Welcome, Admin.\n");
+            pressAnyKey();
+            return 1;
+        }
+
+        attempts--;
+        printf("\nInvalid username or password! Attempts remaining: %d\n", attempts);
+        pressAnyKey();
+    }
+
+    printf("\nToo many failed attempts. Access denied.\n");
+    pressAnyKey();
+    return 0;
+}
+
+int userLogin(void) {
+    char username[MAX_NAME_LEN];
+    char password[MAX_NAME_LEN];
+    int attempts = MAX_LOGIN_ATTEMPTS;
+
+    while (attempts > 0) {
+        clearScreen();
+        displayHeader("USER PANEL LOGIN");
+
+        printf("Username: ");
+        if (scanf(" %49[^\n]", username) != 1) {
+            while (getchar() != '\n');
+            continue;
+        }
+        while (getchar() != '\n');
+
+        printf("Password: ");
+        getHiddenInput(password, MAX_NAME_LEN);
+
+        if (strcmp(username, USER_USERNAME) == 0 && strcmp(password, USER_PASSWORD) == 0) {
+            printf("\nLogin successful! Welcome.\n");
+            pressAnyKey();
+            return 1;
+        }
+
+        attempts--;
+        printf("\nInvalid username or password! Attempts remaining: %d\n", attempts);
+        pressAnyKey();
+    }
+
+    printf("\nToo many failed attempts. Access denied.\n");
+    pressAnyKey();
+    return 0;
+}
+
+/* ---------- FILE OPERATIONS ---------- */
+
+int ensureMovieFileHeader(void) {
+    FILE *fp = fopen(FILE_NAME, "rb");
+    
+    if (fp == NULL) {
+        fp = fopen(FILE_NAME, "wb");
+        if (fp != NULL) {
+            DataFileHeader header = { DATA_FILE_MAGIC, MOVIE_DATA_VERSION };
+            fwrite(&header, sizeof(header), 1, fp);
+            fclose(fp);
+        }
+        return 0;
+    }
+    
+    DataFileHeader header;
+    int valid = (fread(&header, sizeof(header), 1, fp) == 1 &&
+                 header.magic == DATA_FILE_MAGIC &&
+                 header.version == MOVIE_DATA_VERSION);
+    fclose(fp);
+    
+    if (valid) {
+        return 0;
+    }
+    
+    remove("Movie_old_backup.dat");
+    rename(FILE_NAME, "Movie_old_backup.dat");
+    
+    fp = fopen(FILE_NAME, "wb");
+    if (fp != NULL) {
+        DataFileHeader newHeader = { DATA_FILE_MAGIC, MOVIE_DATA_VERSION };
+        fwrite(&newHeader, sizeof(newHeader), 1, fp);
+        fclose(fp);
+    }
+    return 1;
+}
+
+int ensureBookingFileHeader(void) {
+    FILE *fp = fopen(TICKET_FILE, "rb");
+    
+    if (fp == NULL) {
+        fp = fopen(TICKET_FILE, "wb");
+        if (fp != NULL) {
+            DataFileHeader header = { DATA_FILE_MAGIC, BOOKING_DATA_VERSION };
+            fwrite(&header, sizeof(header), 1, fp);
+            fclose(fp);
+        }
+        return 0;
+    }
+    
+    DataFileHeader header;
+    int valid = (fread(&header, sizeof(header), 1, fp) == 1 &&
+                 header.magic == DATA_FILE_MAGIC &&
+                 header.version == BOOKING_DATA_VERSION);
+    fclose(fp);
+    
+    if (valid) {
+        return 0;
+    }
+    
+    remove("Tickets_old_backup.dat");
+    rename(TICKET_FILE, "Tickets_old_backup.dat");
+    
+    fp = fopen(TICKET_FILE, "wb");
+    if (fp != NULL) {
+        DataFileHeader newHeader = { DATA_FILE_MAGIC, BOOKING_DATA_VERSION };
+        fwrite(&newHeader, sizeof(newHeader), 1, fp);
+        fclose(fp);
+    }
+    return 1;
+}
+
+void loadMovies(Movie movies[], int *count) {
+    if (movies == NULL || count == NULL) return;
+    
+    *count = 0;
+    FILE *fp = fopen(FILE_NAME, "rb");
+    
+    if (fp == NULL) {
+        return;
+    }
+    
+    DataFileHeader header;
+    if (fread(&header, sizeof(header), 1, fp) != 1 ||
+        header.magic != DATA_FILE_MAGIC || header.version != MOVIE_DATA_VERSION) {
+        fclose(fp);
+        return;
+    }
+    
+    while (*count < MAX_MOVIES && fread(&movies[*count], sizeof(Movie), 1, fp) == 1) {
+        if (movies[*count].moviestatus == 1) {
+            (*count)++;
+        }
+    }
+    
+    fclose(fp);
+}
+
+void saveMovies(Movie movies[], int count) {
+    if (movies == NULL) return;
+    
+    FILE *fp = fopen(FILE_NAME, "wb");
+    
+    if (fp == NULL) {
+        printf("Error: Cannot open file for saving!\n");
+        return;
+    }
+    
+    DataFileHeader header = { DATA_FILE_MAGIC, MOVIE_DATA_VERSION };
+    fwrite(&header, sizeof(header), 1, fp);
+    
+    int savedCount = 0;
+    int i;
+    for (i = 0; i < count; i++) {
+        if (movies[i].moviestatus == 1) {
+            if (fwrite(&movies[i], sizeof(Movie), 1, fp) == 1) {
+                savedCount++;
+            }
+        }
+    }
+    
+    fclose(fp);
+}
+
+void loadBookings(Booking bookings[], int *count) {
+    if (bookings == NULL || count == NULL) return;
+    
+    *count = 0;
+    FILE *fp = fopen(TICKET_FILE, "rb");
+    
+    if (fp == NULL) {
+        return;
+    }
+    
+    DataFileHeader header;
+    if (fread(&header, sizeof(header), 1, fp) != 1 ||
+        header.magic != DATA_FILE_MAGIC || header.version != BOOKING_DATA_VERSION) {
+        fclose(fp);
+        return;
+    }
+    
+    while (*count < MAX_BOOKINGS && fread(&bookings[*count], sizeof(Booking), 1, fp) == 1) {
+        if (bookings[*count].isCanceled == 0) {
+            (*count)++;
+        }
+    }
+    
+    fclose(fp);
+}
+
+void loadAllBookings(Booking bookings[], int *count) {
+    if (bookings == NULL || count == NULL) return;
+    
+    *count = 0;
+    FILE *fp = fopen(TICKET_FILE, "rb");
+    
+    if (fp == NULL) {
+        return;
+    }
+    
+    DataFileHeader header;
+    if (fread(&header, sizeof(header), 1, fp) != 1 ||
+        header.magic != DATA_FILE_MAGIC || header.version != BOOKING_DATA_VERSION) {
+        fclose(fp);
+        return;
+    }
+    
+    while (*count < MAX_BOOKINGS && fread(&bookings[*count], sizeof(Booking), 1, fp) == 1) {
+        (*count)++;
+    }
+    
+    fclose(fp);
+}
+
+void saveBooking(Booking *b) {
+    if (b == NULL) return;
+    
+    ensureBookingFileHeader();
+    
+    FILE *fp = fopen(TICKET_FILE, "ab");
+    
+    if (fp == NULL) {
+        printf("Error: Cannot open ticket file!\n");
+        return;
+    }
+    
+    if (fwrite(b, sizeof(Booking), 1, fp) != 1) {
+        printf("Error: Failed to save booking!\n");
+    }
+    
+    fclose(fp);
+}
+
+void updateBookingFile(Booking bookings[], int count) {
+    if (bookings == NULL) return;
+    
+    FILE *fp = fopen(TICKET_FILE, "wb");
+    
+    if (fp == NULL) {
+        printf("Error: Cannot update booking file!\n");
+        return;
+    }
+    
+    DataFileHeader header = { DATA_FILE_MAGIC, BOOKING_DATA_VERSION };
+    fwrite(&header, sizeof(header), 1, fp);
+    
+    int i;
+    for (i = 0; i < count; i++) {
+        fwrite(&bookings[i], sizeof(Booking), 1, fp);
+    }
+    
+    fclose(fp);
+}
+
+/* ---------- MOVIE MANAGEMENT FUNCTIONS ---------- */
+
+void initializeMovie(Movie *m) {
+    if (m == NULL) return;
+    
+    int i, j;
+    for (i = 0; i < MAX_SEATS; i++) {
+        for (j = 0; j < MAX_SEATS; j++) {
+            m->seat[i][j] = 0;
+        }
+    }
+    
+    for (i = 0; i < MAX_CUSTOMERS; i++) {
+        strcpy(m->customername[i], "");
+    }
+    
+    m->basic = 0;
+    m->mid = 0;
+    m->special = 0;
+    m->moviestatus = 1;
+    m->totalSeats = MAX_SEATS * MAX_SEATS;
+    m->bookedSeats = 0;
+    m->priceBasic = 150.0;
+    m->priceMid = 250.0;
+    m->priceSpecial = 350.0;
+    m->duration = 120;
+    strcpy(m->genre, "General");
+}
+
+void inputMovieCode(Movie *m) {
+    if (m == NULL) return;
+    
+    printf("Enter Movie ID: ");
+    while (1) {
+        if (scanf("%d", &m->moviecode) == 1) {
+            if (m->moviecode > 0) {
+                break;
+            }
+        }
+        printf("Movie code must be positive! Re-enter: ");
+        while (getchar() != '\n');
+    }
+}
+
+void inputMovieData(Movie *m) {
+    if (m == NULL) return;
+    
+    printf("Enter Movie Name: ");
+    scanf(" %[^\n]", m->moviename);
+    
+    printf("Enter Movie Genre (Action, Comedy, Drama, etc.): ");
+    scanf(" %[^\n]", m->genre);
+    
+    printf("Enter Movie Duration (minutes): ");
+    m->duration = getValidInt(30, 300);
+    
+    printf("\nSelect Show Date:\n");
+    displayAvailableDates();
+    getDateFromUser(&m->year, &m->month, &m->day);
+    
+    if (isDateInPast(m->year, m->month, m->day)) {
+        printf("\n[WARNING] This date is in the past!\n");
+        printf("Do you want to continue? (1-Yes/0-No): ");
+        if (getValidInt(0, 1) == 0) {
+            inputMovieData(m);
+            return;
+        }
+    }
+    
+    printf("\nSelect Show Timing:\n");
+    displayShowTimings();
+    printf("Enter show number (1-5): ");
+    m->show = getValidInt(1, MAX_SHOWS);
+    
+    m->showID = generateShowID(m->moviecode, m->year, m->month, m->day, m->show);
+    
+    printf("\nEnter Basic Seat Price (Rs): ");
+    m->priceBasic = getValidFloat(0, 9999);
+    
+    printf("Enter Mid Seat Price (Rs): ");
+    m->priceMid = getValidFloat(0, 9999);
+    
+    printf("Enter Special Seat Price (Rs): ");
+    m->priceSpecial = getValidFloat(0, 9999);
+    
+    initializeMovie(m);
+}
+
+int isMovieCodeDuplicate(int movieCode) {
+    Movie temp;
+    FILE *fp = fopen(FILE_NAME, "rb");
+    
+    if (fp == NULL) {
+        return 0;
+    }
+    
+    DataFileHeader header;
+    if (fread(&header, sizeof(header), 1, fp) != 1 ||
+        header.magic != DATA_FILE_MAGIC || header.version != MOVIE_DATA_VERSION) {
+        fclose(fp);
+        return 0;
+    }
+    
+    while (fread(&temp, sizeof(Movie), 1, fp) == 1) {
+        if (temp.moviecode == movieCode && temp.moviestatus == 1) {
+            fclose(fp);
+            return 1;
+        }
+    }
+    
+    fclose(fp);
+    return 0;
+}
+
+int getMovieIndex(int movieCode, Movie movies[], int count) {
+    if (movies == NULL) return -1;
+    
+    int i;
+    for (i = 0; i < count; i++) {
+        if (movies[i].moviecode == movieCode && movies[i].moviestatus == 1) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+void addNewMovie(void) {
+    Movie newMovie;
+    Movie movies[MAX_MOVIES];
+    int count = 0;
+    int addAnother = 1;
+    
+    loadMovies(movies, &count);
+    
+    clearScreen();
+    displayHeader("ADD NEW MOVIE");
+    
+    inputMovieCode(&newMovie);
+    
+    if (isMovieCodeDuplicate(newMovie.moviecode)) {
+        printf("\n[ERROR] Movie ID already exists!\n");
+        pressAnyKey();
+        return;
+    }
+    
+    do {
+        inputMovieData(&newMovie);
+        
+        if (isShowDuplicate(newMovie.moviecode, newMovie.year, newMovie.month, 
+                           newMovie.day, newMovie.show, movies, count)) {
+            printf("\n[ERROR] This show already exists for this movie on this date!\n");
+            printf("Do you want to add another show? (1-Yes/0-No): ");
+            if (getValidInt(0, 1) == 1) {
+                continue;
+            } else {
+                pressAnyKey();
+                return;
+            }
+        }
+        
+        ensureMovieFileHeader();
+        
+        FILE *fp = fopen(FILE_NAME, "ab");
+        if (fp == NULL) {
+            printf("Error: Cannot open file!\n");
+            pressAnyKey();
+            return;
+        }
+        
+        if (fwrite(&newMovie, sizeof(Movie), 1, fp) == 1) {
+            char timeStr[20];
+            getShowTime(newMovie.show, timeStr);
+            printf("\n[OK] Show added successfully!\n");
+            printf("  Movie: %s\n", newMovie.moviename);
+            printf("  Date: %04d-%02d-%02d\n", newMovie.year, newMovie.month, newMovie.day);
+            printf("  Show: %s (%s)\n", getShowName(newMovie.show), timeStr);
+            printf("  Show ID: %d\n", newMovie.showID);
+        } else {
+            printf("\n[ERROR] Failed to save show!\n");
+        }
+        
+        fclose(fp);
+        
+        printf("\nDo you want to add another show for this movie? (1-Yes/0-No): ");
+        addAnother = getValidInt(0, 1);
+        
+        if (addAnother == 1) {
+            clearScreen();
+            displayHeader("ADD ANOTHER SHOW");
+            printf("Movie: %s (ID: %d)\n", newMovie.moviename, newMovie.moviecode);
+        }
+        
+    } while (addAnother == 1);
+    
+    pressAnyKey();
+}
+
+void displayMovieDetails(Movie *m) {
+    if (m == NULL) return;
+    
+    char timeStr[20];
+    getShowTime(m->show, timeStr);
+    char dateStr[20];
+    sprintf(dateStr, "%04d-%02d-%02d", m->year, m->month, m->day);
+    
+    int isPast = isDateInPast(m->year, m->month, m->day);
+    int canBook = isBookingAllowed(m);
+    char bookingStatus[50];
+    getBookingBlockReason(m, bookingStatus, sizeof(bookingStatus));
+    
+    printf("\n+----------------------------------------------------+\n");
+    printf("| MOVIE DETAILS                                     |\n");
+    printf("+----------------------------------------------------|\n");
+    printf("| ID          : %-30d   |\n", m->moviecode);
+    printf("| Name        : %-30s   |\n", m->moviename);
+    printf("| Genre       : %-30s   |\n", m->genre);
+    printf("| Duration    : %-30d min|\n", m->duration);
+    printf("| Date        : %-30s   |\n", dateStr);
+    printf("| Show        : %-30s   |\n", getShowName(m->show));
+    printf("| Show Time   : %-30s   |\n", timeStr);
+    printf("| Show ID     : %-30d   |\n", m->showID);
+    printf("| Status      : %-30s   |\n", isPast ? "Completed" : (m->moviestatus ? "Active" : "Inactive"));
+    printf("| Booking     : %-30s   |\n", canBook ? "Available" : "Closed");
+    if (!canBook) {
+        printf("| Reason      : %-30s   |\n", bookingStatus);
+    }
+    printf("| Total Seats : %-30d   |\n", m->totalSeats);
+    printf("| Booked      : %-30d   |\n", m->bookedSeats);
+    printf("| Available   : %-30d   |\n", m->totalSeats - m->bookedSeats);
+    printf("| Prices:                                           |\n");
+    printf("|   Basic     : Rs %-24.2f   |\n", m->priceBasic);
+    printf("|   Mid       : Rs %-24.2f   |\n", m->priceMid);
+    printf("|   Special   : Rs %-24.2f   |\n", m->priceSpecial);
+    printf("+----------------------------------------------------+\n");
+}
+
+void displayAllMovies(void) {
+    Movie movies[MAX_MOVIES];
+    int count = 0;
+    int displayOption;
+    
+    clearScreen();
+    displayHeader("ALL MOVIES");
+    
+    loadMovies(movies, &count);
+    
+    if (count == 0) {
+        printf("No movies found in the system.\n");
+        pressAnyKey();
+        return;
+    }
+    
+    printf("Total Active Shows: %d\n\n", count);
+    
+    printf("Select display option:\n");
+    printf("1. Show all shows individually\n");
+    printf("2. Group by movie\n");
+    printf("Enter choice: ");
+    displayOption = getValidInt(1, 2);
+    
+    if (displayOption == 1) {
+        int i;
+        for (i = 0; i < count; i++) {
+            printf("Show #%d:\n", i + 1);
+            displayMovieDetails(&movies[i]);
+            printf("\n");
+        }
+    } else {
+        int i;
+        int processed[MAX_MOVIES] = {0};
+        for (i = 0; i < count; i++) {
+            if (processed[i]) continue;
+            
+            printf("\nMovie: %s (ID: %d)\n", movies[i].moviename, movies[i].moviecode);
+            printf("+----------------------------------------------------------------------------------------------------+\n");
+            printf("| #  | Show                | Time       | Date       | Available | Booking Status                    |\n");
+            printf("+----+---------------------+------------+------------+-----------+-----------------------------------|\n");
+            
+            int showCount = 0;
+            int j;
+            for (j = i; j < count; j++) {
+                if (movies[j].moviecode == movies[i].moviecode && movies[j].moviestatus == 1) {
+                    char timeStr[20];
+                    char dateStr[20];
+                    char status[50];
+                    getShowTime(movies[j].show, timeStr);
+                    sprintf(dateStr, "%04d-%02d-%02d", movies[j].year, movies[j].month, movies[j].day);
+                    getBookingBlockReason(&movies[j], status, sizeof(status));
+                    
+                    printf("| %-2d | %-19s | %-10s | %-10s | %-9d | %-33s |\n",
+                           showCount + 1, getShowName(movies[j].show),
+                           timeStr, dateStr, movies[j].totalSeats - movies[j].bookedSeats,
+                           isBookingAllowed(&movies[j]) ? "Available" : status);
+                    processed[j] = 1;
+                    showCount++;
+                }
+            }
+            printf("+----------------------------------------------------------------------------------------------------+\n");
+        }
+    }
+    
+    pressAnyKey();
+}
+
+void displayMovieSchedule(void) {
+    Movie movies[MAX_MOVIES];
+    int count = 0;
+    int year, month, day;
+    int showAll = 0;
+    
+    clearScreen();
+    displayHeader("MOVIE SCHEDULE");
+    
+    printf("1. View shows for a specific date\n");
+    printf("2. View all upcoming shows\n");
+    printf("Enter choice: ");
+    int choice = getValidInt(1, 2);
+    
+    if (choice == 1) {
+        printf("\nEnter date to view schedule:\n");
+        getDateFromUser(&year, &month, &day);
+    } else {
+        showAll = 1;
+    }
+    
+    loadMovies(movies, &count);
+    
+    if (count == 0) {
+        printf("No movies found in the system.\n");
+        pressAnyKey();
+        return;
+    }
+    
+    printf("\n+----------------------------------------------------------------------------------------------------+\n");
+    printf("| #  | Movie Name          | Show       | Time       | Date       | Available | Booking Status      |\n");
+    printf("+----+---------------------+------------+------------+------------+-----------+---------------------|\n");
+    
+    int found = 0;
+    int i;
+    for (i = 0; i < count; i++) {
+        int showDate = 0;
+        if (showAll) {
+            if (!isDateInPast(movies[i].year, movies[i].month, movies[i].day)) {
+                showDate = 1;
+            }
+        } else {
+            if (movies[i].year == year && movies[i].month == month && 
+                movies[i].day == day && movies[i].moviestatus == 1) {
+                showDate = 1;
+            }
+        }
+        
+        if (showDate) {
+            char timeStr[20];
+            char dateStr[20];
+            char status[50];
+            getShowTime(movies[i].show, timeStr);
+            sprintf(dateStr, "%04d-%02d-%02d", movies[i].year, movies[i].month, movies[i].day);
+            getBookingBlockReason(&movies[i], status, sizeof(status));
+            
+            printf("| %-2d | %-19s | %-10s | %-10s | %-10s | %-9d | %-19s |\n",
+                   found + 1, movies[i].moviename, getShowName(movies[i].show),
+                   timeStr, dateStr, movies[i].totalSeats - movies[i].bookedSeats,
+                   isBookingAllowed(&movies[i]) ? "Available" : status);
+            found++;
+        }
+    }
+    
+    if (found == 0) {
+        printf("| No shows found for the selected criteria.                                            |\n");
+    }
+    printf("+----------------------------------------------------------------------------------------------------+\n");
+    
+    pressAnyKey();
+}
+
+void updateMovie(void) {
+    Movie movies[MAX_MOVIES];
+    int count = 0;
+    int updateCode;
+    int showIndex;
+    
+    clearScreen();
+    displayHeader("UPDATE MOVIE SHOW");
+    
+    printf("Enter Movie ID to update: ");
+    while (scanf("%d", &updateCode) != 1 || updateCode < 0) {
+        printf("Invalid input! Enter a positive number: ");
+        while (getchar() != '\n');
+    }
+    
+    loadMovies(movies, &count);
+    
+    int showCount = 0;
+    int showIndices[MAX_MOVIES];
+    int i;
+    for (i = 0; i < count; i++) {
+        if (movies[i].moviecode == updateCode && movies[i].moviestatus == 1) {
+            showIndices[showCount++] = i;
+        }
+    }
+    
+    if (showCount == 0) {
+        printf("\n[ERROR] Movie ID %d not found!\n", updateCode);
+        pressAnyKey();
+        return;
+    }
+    
+    printf("\nShows found for Movie ID %d:\n", updateCode);
+    displayMovieShows(movies, count, updateCode);
+    
+    printf("\nSelect show number to update (1-%d): ", showCount);
+    int selection = getValidInt(1, showCount);
+    showIndex = showIndices[selection - 1];
+    
+    printf("\nCurrent Show Details:\n");
+    displayMovieDetails(&movies[showIndex]);
+    
+    // Check if booking is closed for this show
+    if (!isBookingAllowed(&movies[showIndex])) {
+        printf("\n[WARNING] This show is currently closed for bookings.\n");
+        printf("Updating may affect existing bookings.\n");
+        printf("Continue? (1-Yes/0-No): ");
+        if (getValidInt(0, 1) == 0) {
+            pressAnyKey();
+            return;
+        }
+    }
+    
+    printf("\nEnter new details (press Enter to keep current):\n");
+    printf("Enter Movie Name (current: %s): ", movies[showIndex].moviename);
+    char newName[MAX_NAME_LEN];
+    fgets(newName, sizeof(newName), stdin);
+    newName[strcspn(newName, "\n")] = 0;
+    if (strlen(newName) > 0) {
+        strcpy(movies[showIndex].moviename, newName);
+    }
+    
+    printf("Enter Genre (current: %s): ", movies[showIndex].genre);
+    char newGenre[30];
+    fgets(newGenre, sizeof(newGenre), stdin);
+    newGenre[strcspn(newGenre, "\n")] = 0;
+    if (strlen(newGenre) > 0) {
+        strcpy(movies[showIndex].genre, newGenre);
+    }
+    
+    printf("Enter Duration in minutes (current: %d): ", movies[showIndex].duration);
+    char input[10];
+    fgets(input, sizeof(input), stdin);
+    if (strlen(input) > 1) {
+        int newDuration = atoi(input);
+        if (newDuration > 0) movies[showIndex].duration = newDuration;
+    }
+    
+    printf("\nSelect New Show Date (current: %04d-%02d-%02d):\n", 
+           movies[showIndex].year, movies[showIndex].month, movies[showIndex].day);
+    displayAvailableDates();
+    getDateFromUser(&movies[showIndex].year, &movies[showIndex].month, &movies[showIndex].day);
+    
+    printf("\nSelect Show Timing:\n");
+    displayShowTimings();
+    printf("Enter show number (current: %d): ", movies[showIndex].show);
+    int newShow = getValidInt(1, MAX_SHOWS);
+    movies[showIndex].show = newShow;
+    movies[showIndex].showID = generateShowID(movies[showIndex].moviecode, 
+                                              movies[showIndex].year, 
+                                              movies[showIndex].month, 
+                                              movies[showIndex].day, 
+                                              movies[showIndex].show);
+    
+    printf("Enter Basic Price (current: Rs %.2f): ", movies[showIndex].priceBasic);
+    float newPrice = getValidFloat(0, 9999);
+    movies[showIndex].priceBasic = newPrice;
+    
+    printf("Enter Mid Price (current: Rs %.2f): ", movies[showIndex].priceMid);
+    newPrice = getValidFloat(0, 9999);
+    movies[showIndex].priceMid = newPrice;
+    
+    printf("Enter Special Price (current: Rs %.2f): ", movies[showIndex].priceSpecial);
+    newPrice = getValidFloat(0, 9999);
+    movies[showIndex].priceSpecial = newPrice;
+    
+    saveMovies(movies, count);
+    printf("\n[OK] Show updated successfully!\n");
+    
+    pressAnyKey();
+}
+
+void deleteMovie(void) {
+    Movie movies[MAX_MOVIES];
+    int count = 0;
+    int deleteCode;
+    int confirm;
+    int showIndex;
+    
+    clearScreen();
+    displayHeader("DELETE MOVIE SHOW");
+    
+    printf("Enter Movie ID to delete: ");
+    while (scanf("%d", &deleteCode) != 1 || deleteCode < 0) {
+        printf("Invalid input! Enter a positive number: ");
+        while (getchar() != '\n');
+    }
+    
+    loadMovies(movies, &count);
+    
+    int showCount = 0;
+    int showIndices[MAX_MOVIES];
+    int i;
+    for (i = 0; i < count; i++) {
+        if (movies[i].moviecode == deleteCode && movies[i].moviestatus == 1) {
+            showIndices[showCount++] = i;
+        }
+    }
+    
+    if (showCount == 0) {
+        printf("\n[ERROR] Movie ID %d not found!\n", deleteCode);
+        pressAnyKey();
+        return;
+    }
+    
+    printf("\nShows found for Movie ID %d:\n", deleteCode);
+    displayMovieShows(movies, count, deleteCode);
+    
+    if (showCount > 1) {
+        printf("\nSelect show to delete (1-%d): ", showCount);
+        int selection = getValidInt(1, showCount);
+        showIndex = showIndices[selection - 1];
+    } else {
+        showIndex = showIndices[0];
+    }
+    
+    printf("\nShow found:\n");
+    displayMovieDetails(&movies[showIndex]);
+    
+    printf("\n[WARNING] This will delete this show and all associated bookings!\n");
+    printf("Are you sure you want to delete this show? (1-Yes/0-No): ");
+    confirm = getValidInt(0, 1);
+    
+    if (confirm == 1) {
+        movies[showIndex].moviestatus = 0;
+        saveMovies(movies, count);
+        printf("\n[OK] Show deleted successfully!\n");
+    } else {
+        printf("\nDeletion cancelled.\n");
+    }
+    
+    pressAnyKey();
+}
+
+/* ---------- SEAT DISPLAY FUNCTIONS ---------- */
+
+void displaySeatLayout(Movie *m) {
+    if (m == NULL) return;
+    
+    char timeStr[20];
+    getShowTime(m->show, timeStr);
+    
+    printf("\n      Movie: %s\n", m->moviename);
+    printf("      Date: %04d-%02d-%02d\n", m->year, m->month, m->day);
+    printf("      Show: %s (%s)\n", getShowName(m->show), timeStr);
+    printf("      Show ID: %d\n", m->showID);
+    printf("\n      SEAT LAYOUT\n");
+    printf("     +-----------------------------+\n");
+    printf("     | 1  2  3  4  5  6  7  8  9 10|\n");
+    printf("     +-----------------------------|\n");
+    
+    int i,j;
+    for (i = 0; i < MAX_SEATS; i++) {
+        printf(" %2d  | ", i + 1);
+        for (j = 0; j < MAX_SEATS; j++) {
+            if (m->seat[i][j] == 0) {
+                printf("O ");
+            } else {
+                printf("X ");
+            }
+        }
+        printf("|\n");
+    }
+    printf("     +-----------------------------+\n");
+    printf("     O = Available  X = Booked\n\n");
+    printf("     Total Seats: %d  |  Booked: %d  |  Available: %d\n", 
+           m->totalSeats, m->bookedSeats, m->totalSeats - m->bookedSeats);
+}
+
+/* ---------- BOOKING FUNCTIONS ---------- */
+
+int getNextBookingID(void) {
+    Booking temp;
+    int maxID = 0;
+    FILE *fp = fopen(TICKET_FILE, "rb");
+    
+    if (fp == NULL) {
+        return 1;
+    }
+    
+    DataFileHeader header;
+    if (fread(&header, sizeof(header), 1, fp) != 1 ||
+        header.magic != DATA_FILE_MAGIC || header.version != BOOKING_DATA_VERSION) {
+        fclose(fp);
+        return 1;
+    }
+    
+    while (fread(&temp, sizeof(Booking), 1, fp) == 1) {
+        if (temp.bookingID > maxID) {
+            maxID = temp.bookingID;
+        }
+    }
+    
+    fclose(fp);
+    return maxID + 1;
+}
+
+void generateBookingID(Booking *b) {
+    if (b == NULL) return;
+    b->bookingID = getNextBookingID();
+}
+
+void bookTicket(void) {
+    Movie movies[MAX_MOVIES];
+    int count = 0;
+    int movieCode;
+    int showIndex = -1;
+    int row, col, seatType;
+    char customerName[MAX_NAME_LEN];
+    Booking newBooking;
+    int numTickets;
+    int showSelection;
+    int transactionID = 0;
+    int ticketsSaved = 0;
+    char blockReason[100];
+    
+    clearScreen();
+    displayHeader("BOOK TICKET");
+    
+    loadMovies(movies, &count);
+    
+    if (count == 0) {
+        printf("No movies available for booking.\n");
+        pressAnyKey();
+        return;
+    }
+    
+    printf("Available Movies:\n");
+    printf("+---------------------------------------+\n");
+    printf("| #  | Movie Name          | Movie ID   |\n");
+    printf("+----+---------------------+------------|\n");
+    
+    int uniqueMovies = 0;
+    int movieCodes[MAX_MOVIES] = {0};
+    int movieIndices[MAX_MOVIES] = {0};
+    
+    int i,j;
+    for (i = 0; i < count; i++) {
+        int alreadyAdded = 0;
+        for (j = 0; j < uniqueMovies; j++) {
+            if (movieCodes[j] == movies[i].moviecode) {
+                alreadyAdded = 1;
+                break;
+            }
+        }
+        if (!alreadyAdded && movies[i].moviestatus == 1) {
+            movieCodes[uniqueMovies] = movies[i].moviecode;
+            movieIndices[uniqueMovies] = i;
+            uniqueMovies++;
+        }
+    }
+    
+    for (i = 0; i < uniqueMovies; i++) {
+        printf("| %-2d | %-19s | %-10d |\n", 
+               i + 1, movies[movieIndices[i]].moviename, movies[movieIndices[i]].moviecode);
+    }
+    printf("+---------------------------------------+\n");
+    
+    printf("\nEnter Movie ID: ");
+    while (scanf("%d", &movieCode) != 1 || movieCode < 0) {
+        printf("Invalid input! Enter a positive number: ");
+        while (getchar() != '\n');
+    }
+    
+    printf("\nAvailable shows for this movie:\n");
+    displayMovieShows(movies, count, movieCode);
+    
+    int showCount = 0;
+    int showIndices[MAX_MOVIES];
+    for (i = 0; i < count; i++) {
+        if (movies[i].moviecode == movieCode && movies[i].moviestatus == 1) {
+            if (!isDateInPast(movies[i].year, movies[i].month, movies[i].day) && 
+                isBookingAllowed(&movies[i])) {
+                showIndices[showCount++] = i;
+            }
+        }
+    }
+    
+    if (showCount == 0) {
+        printf("\n[INFO] No upcoming shows available for booking for this movie!\n");
+        printf("       Shows may have already started or are fully booked.\n");
+        pressAnyKey();
+        return;
+    }
+    
+    printf("\nSelect show (1-%d) - Only shows available for booking shown: ", showCount);
+    showSelection = getValidInt(1, showCount);
+    showIndex = showIndices[showSelection - 1];
+    
+    Movie *selectedMovie = &movies[showIndex];
+    
+    // Double-check booking allowed
+    if (!isBookingAllowed(selectedMovie)) {
+        getBookingBlockReason(selectedMovie, blockReason, sizeof(blockReason));
+        printf("\n[ERROR] Booking not allowed for this show.\n");
+        printf("Reason: %s\n", blockReason);
+        pressAnyKey();
+        return;
+    }
+    
+    displaySeatLayout(selectedMovie);
+    
+    if (selectedMovie->bookedSeats >= selectedMovie->totalSeats) {
+        printf("\n[INFO] Sorry, this show is fully booked!\n");
+        pressAnyKey();
+        return;
+    }
+    
+    printf("How many tickets do you want to book? ");
+    numTickets = getValidInt(1, selectedMovie->totalSeats - selectedMovie->bookedSeats);
+    
+    printf("\nEnter Customer Name: ");
+    scanf(" %[^\n]", customerName);
+    
+    printf("\nSelect Seat Type:\n");
+    printf("1. Basic (Rs %.2f)\n", selectedMovie->priceBasic);
+    printf("2. Mid (Rs %.2f)\n", selectedMovie->priceMid);
+    printf("3. Special (Rs %.2f)\n", selectedMovie->priceSpecial);
+    printf("Enter choice: ");
+    seatType = getValidInt(1, 3);
+    
+    float totalPrice = 0;
+    int t;
+    for (t = 0; t < numTickets; t++) {
+        printf("\n--- Ticket %d of %d ---\n", t + 1, numTickets);
+        printf("Select Seat (Row 1-10, Column 1-10):\n");
+        printf("Enter row: ");
+        row = getValidInt(1, MAX_SEATS) - 1;
+        printf("Enter column: ");
+        col = getValidInt(1, MAX_SEATS) - 1;
+        
+        if (selectedMovie->seat[row][col] == 1) {
+            printf("\n[ERROR] Seat already booked! Try again.\n");
+            t--;
+            continue;
+        }
+        
+        selectedMovie->seat[row][col] = 1;
+        strcpy(selectedMovie->customername[selectedMovie->bookedSeats], customerName);
+        selectedMovie->bookedSeats++;
+        
+        float seatPrice;
+        switch(seatType) {
+            case 1: seatPrice = selectedMovie->priceBasic; break;
+            case 2: seatPrice = selectedMovie->priceMid; break;
+            case 3: seatPrice = selectedMovie->priceSpecial; break;
+            default: seatPrice = 0.0;
+        }
+        totalPrice += seatPrice;
+        
+        memset(&newBooking, 0, sizeof(Booking));
+        strcpy(newBooking.customerName, customerName);
+        newBooking.movieCode = movieCode;
+        newBooking.show = selectedMovie->show;
+        newBooking.showID = selectedMovie->showID;
+        newBooking.seatRow = row + 1;
+        newBooking.seatCol = col + 1;
+        newBooking.seatType = seatType;
+        newBooking.price = seatPrice;
+        strcpy(newBooking.movieName, selectedMovie->moviename);
+        newBooking.isCanceled = 0;
+        
+        char timeStr[20];
+        getShowTime(selectedMovie->show, timeStr);
+        strcpy(newBooking.showTime, timeStr);
+        
+        char dateStr[20];
+        sprintf(dateStr, "%04d-%02d-%02d", selectedMovie->year, selectedMovie->month, selectedMovie->day);
+        strcpy(newBooking.showDate, dateStr);
+        
+        getCurrentDateTime(newBooking.bookingDate);
+        
+        generateBookingID(&newBooking);
+        
+        if (ticketsSaved == 0) {
+            transactionID = newBooking.bookingID;
+        }
+        newBooking.transactionID = transactionID;
+        
+        saveBooking(&newBooking);
+        ticketsSaved++;
+        
+        printf("[OK] Ticket %d booked - Seat: Row %d, Column %d (Booking ID: %d, Transaction ID: %d)\n", 
+               t + 1, row + 1, col + 1, newBooking.bookingID, transactionID);
+    }
+    
+    saveMovies(movies, count);
+    
+    char timeStr[20];
+    getShowTime(selectedMovie->show, timeStr);
+    char dateStr[20];
+    sprintf(dateStr, "%04d-%02d-%02d", selectedMovie->year, selectedMovie->month, selectedMovie->day);
+    
+    printf("\n========================================\n");
+    printf("[OK] Booking Summary\n");
+    printf("  Transaction ID: %d\n", transactionID);
+    printf("  Customer: %s\n", customerName);
+    printf("  Movie: %s\n", selectedMovie->moviename);
+    printf("  Date: %s\n", dateStr);
+    printf("  Show: %s (%s)\n", getShowName(selectedMovie->show), timeStr);
+    printf("  Show ID: %d\n", selectedMovie->showID);
+    printf("  Tickets Booked: %d\n", ticketsSaved);
+    printf("  Total Price: Rs %.2f\n", totalPrice);
+    printf("  Booking Date: %s\n", newBooking.bookingDate);
+    printf("========================================\n");
+    printf("\n[INFO] Please arrive at least 15 minutes before show time.\n");
+    
+    pressAnyKey();
+}
+
+void cancelTicket(void) {
+    Movie movies[MAX_MOVIES];
+    int count = 0;
+    int bookingID;
+    Booking bookings[MAX_BOOKINGS];
+    int bookingCount = 0;
+    int found = 0;
+    int confirm;
+    
+    clearScreen();
+    displayHeader("CANCEL TICKET");
+    
+    printf("Enter Booking ID to cancel: ");
+    while (scanf("%d", &bookingID) != 1 || bookingID < 0) {
+        printf("Invalid input! Enter a positive number: ");
+        while (getchar() != '\n');
+    }
+    
+    loadMovies(movies, &count);
+    loadAllBookings(bookings, &bookingCount);
+    
+    int i;
+    for (i = 0; i < bookingCount; i++) {
+        if (bookings[i].bookingID == bookingID && bookings[i].isCanceled == 0) {
+            found = 1;
+            printf("\nBooking Found:\n");
+            printf("+----------------------------------------------------+\n");
+            printf("| Booking ID    : %-12d                           |\n", bookings[i].bookingID);
+            printf("| Transaction ID: %-12d                           |\n", bookings[i].transactionID);
+            printf("| Customer      : %-12s                           |\n", bookings[i].customerName);
+            printf("| Movie         : %-12s                           |\n", bookings[i].movieName);
+            printf("| Movie ID      : %-12d                           |\n", bookings[i].movieCode);
+            printf("| Show ID       : %-12d                           |\n", bookings[i].showID);
+            printf("| Date          : %-12s                           |\n", bookings[i].showDate);
+            printf("| Show          : %-12s                           |\n", getShowName(bookings[i].show));
+            printf("| Show Time     : %-12s                           |\n", bookings[i].showTime);
+            printf("| Seat          : Row %d, Col %-6d                |\n", bookings[i].seatRow, bookings[i].seatCol);
+            printf("| Price         : Rs %-10.2f                      |\n", bookings[i].price);
+            printf("| Booking Date  : %-12s                           |\n", bookings[i].bookingDate);
+            printf("+----------------------------------------------------+\n");
+            
+            int year, month, day;
+            sscanf(bookings[i].showDate, "%d-%d-%d", &year, &month, &day);
+            if (isDateInPast(year, month, day)) {
+                printf("\n[WARNING] This show has already passed!\n");
+                printf("Refund may not be available.\n");
+            } else if (isDateToday(year, month, day)) {
+                int showStart = getShowStartMinutes(bookings[i].show);
+                time_t t = time(NULL);
+                struct tm *now = localtime(&t);
+                int currentMinutes = now->tm_hour * 60 + now->tm_min;
+                if (currentMinutes >= showStart) {
+                    printf("\n[WARNING] This show has already started!\n");
+                    printf("Refund may not be available.\n");
+                }
+            }
+            
+            printf("\nCancel this booking? (1-Yes/0-No): ");
+            confirm = getValidInt(0, 1);
+            
+            if (confirm == 1) {
+                int movieIndex = -1, j;
+                for (j = 0; j < count; j++) {
+                    if (movies[j].showID == bookings[i].showID && movies[j].moviestatus == 1) {
+                        movieIndex = j;
+                        break;
+                    }
+                }
+                
+                if (movieIndex != -1) {
+                    movies[movieIndex].seat[bookings[i].seatRow - 1][bookings[i].seatCol - 1] = 0;
+                    movies[movieIndex].bookedSeats--;
+                    saveMovies(movies, count);
+                }
+                
+                bookings[i].isCanceled = 1;
+                updateBookingFile(bookings, bookingCount);
+                
+                printf("\n[OK] Booking canceled successfully!\n");
+            } else {
+                printf("\nCancellation cancelled.\n");
+            }
+            break;
+        }
+    }
+    
+    if (!found) {
+        printf("\n[ERROR] Booking ID %d not found or already canceled!\n", bookingID);
+    }
+    
+    pressAnyKey();
+}
+
+/* ==================== VIEW MY BOOKINGS ==================== */
+
+void displayMyBookings(void) {
+    Booking bookings[MAX_BOOKINGS];
+    int count = 0;
+    char customerName[MAX_NAME_LEN];
+    int found = 0;
+    float totalSpent = 0;
+    int totalTickets = 0;
+    
+    clearScreen();
+    displayHeader("MY BOOKINGS");
+    
+    printf("Enter your name to view your bookings: ");
+    scanf(" %[^\n]", customerName);
+    
+    loadBookings(bookings, &count);
+    
+    if (count == 0) {
+        printf("\nNo bookings found in the system.\n");
+        pressAnyKey();
+        return;
+    }
+    
+    printf("\n+-------------------------------------------------------------------------------------------------------------------+\n");
+    printf("| Booking ID | Movie               | Date       | Show       | Seat    | Price   | Status               | Cancellable |\n");
+    printf("+------------+---------------------+------------+------------+---------+---------+----------------------+-------------|\n");
+    
+    int i;
+    for (i = 0; i < count; i++) {
+        if (bookings[i].isCanceled == 0 && 
+            strcmp(bookings[i].customerName, customerName) == 0) {
+            found = 1;
+            char status[30];
+            char cancellable[15];
+            
+            // Check if show has passed or started
+            int year, month, day;
+            sscanf(bookings[i].showDate, "%d-%d-%d", &year, &month, &day);
+            
+            int canCancel = 1;
+            if (isDateInPast(year, month, day)) {
+                strcpy(status, "Completed");
+                canCancel = 0;
+            } else if (isDateToday(year, month, day)) {
+                int showStart = getShowStartMinutes(bookings[i].show);
+                time_t t = time(NULL);
+                struct tm *now = localtime(&t);
+                int currentMinutes = now->tm_hour * 60 + now->tm_min;
+                if (currentMinutes >= showStart) {
+                    strcpy(status, "Started");
+                    canCancel = 0;
+                } else {
+                    strcpy(status, "Upcoming");
+                }
+            } else {
+                strcpy(status, "Upcoming");
+            }
+            
+            strcpy(cancellable, canCancel ? "Yes" : "No");
+            
+            printf("| %-10d | %-19s | %-10s | %-10s | R%d C%-3d | Rs%-6.2f | %-20s | %-11s |\n",
+                   bookings[i].bookingID, bookings[i].movieName,
+                   bookings[i].showDate, bookings[i].showTime,
+                   bookings[i].seatRow, bookings[i].seatCol,
+                   bookings[i].price, status, cancellable);
+            
+            totalSpent += bookings[i].price;
+            totalTickets++;
+        }
+    }
+    
+    if (!found) {
+        printf("| No bookings found for customer: %-30s                             |\n", customerName);
+    }
+    
+    printf("+-------------------------------------------------------------------------------------------------------------------+\n");
+    
+    if (found) {
+        printf("\n+----------------------------------------------------+\n");
+        printf("| SUMMARY FOR: %-31s |\n", customerName);
+        printf("+----------------------------------------------------|\n");
+        printf("| Total Tickets Booked : %-18d                |\n", totalTickets);
+        printf("| Total Amount Spent   : Rs %-22.2f          |\n", totalSpent);
+        printf("+----------------------------------------------------+\n");
+        
+        printf("\n[INFO] To cancel a booking, go to 'Cancel Ticket' option and enter the Booking ID.\n");
+        printf("[NOTE] Bookings cannot be canceled after the show has started.\n");
+    }
+    
+    pressAnyKey();
+}
+
+/* ---------- BOOKING HISTORY (ADMIN) ---------- */
+
+void displayBookingHistory(void) {
+    Booking bookings[MAX_BOOKINGS];
+    int count = 0;
+    float totalRevenue = 0;
+    int totalTicketsSold = 0;
+    int totalTransactions = 0;
+    int processed[MAX_BOOKINGS] = {0};
+    
+    clearScreen();
+    displayHeader("BOOKING HISTORY (ADMIN)");
+    
+    loadBookings(bookings, &count);
+    
+    if (count == 0) {
+        printf("No active bookings found.\n");
+        pressAnyKey();
+        return;
+    }
+    
+    printf("+---------------------------------------------------------------------------------------------------+\n");
+    printf("| Txn ID | Customer    | Movie               | Date       | Show       | Seats            | Tickets | Total    |\n");
+    printf("+--------+-------------+---------------------+------------+------------+------------------+---------+----------|\n");
+    
+    int i;
+    for (i = 0; i < count; i++) {
+        if (processed[i] || bookings[i].isCanceled == 1) {
+            continue;
+        }
+        
+        int transactionID = bookings[i].transactionID;
+        char seatsList[512];
+        seatsList[0] = '\0';
+        float transactionTotal = 0;
+        int ticketCount = 0;
+        
+        int j;
+        for (j = i; j < count; j++) {
+            if (!processed[j] && bookings[j].isCanceled == 0 && bookings[j].transactionID == transactionID) {
+                char seatEntry[16];
+                sprintf(seatEntry, "%sR%dC%d", ticketCount > 0 ? "," : "", bookings[j].seatRow, bookings[j].seatCol);
+                
+                if (strlen(seatsList) + strlen(seatEntry) < sizeof(seatsList) - 1) {
+                    strcat(seatsList, seatEntry);
+                }
+                
+                transactionTotal += bookings[j].price;
+                ticketCount++;
+                processed[j] = 1;
+            }
+        }
+        
+        printf("| %-6d | %-11s | %-19s | %-10s | %-10s | %-16s | %-7d | Rs%-7.2f |\n",
+               transactionID, bookings[i].customerName, bookings[i].movieName,
+               bookings[i].showDate, bookings[i].showTime,
+               seatsList, ticketCount, transactionTotal);
+        
+        totalRevenue += transactionTotal;
+        totalTicketsSold += ticketCount;
+        totalTransactions++;
+    }
+    
+    printf("+---------------------------------------------------------------------------------------------------+\n");
+    printf("\n+----------------------------------------------------+\n");
+    printf("| SUMMARY                                            |\n");
+    printf("+----------------------------------------------------|\n");
+    printf("| Total Transactions : %-10d                      |\n", totalTransactions);
+    printf("| Total Tickets Sold : %-10d                      |\n", totalTicketsSold);
+    printf("| Total Revenue      : Rs %-22.2f          |\n", totalRevenue);
+    printf("+----------------------------------------------------+\n");
+    
+    pressAnyKey();
+}
+
+/* ---------- MENU DISPLAY ---------- */
+
+void displayMainMenu(void) {
+    clearScreen();
+    printf("+---------------------------------------------------+\n");
+    printf("|         MOVIE TICKET BOOKING SYSTEM              |\n");
+    printf("|---------------------------------------------------|\n");
+    printf("|                                                   |\n");
+    printf("|  1. Admin Panel                                  |\n");
+    printf("|  2. User Panel                                   |\n");
+    printf("|  3. Today's Schedule                             |\n");
+    printf("|  4. View Show Timings                            |\n");
+    printf("|  5. View Movie Schedule                          |\n");
+    printf("|  6. Exit                                         |\n");
+    printf("|                                                   |\n");
+    printf("+---------------------------------------------------+\n");
+    printf("\nEnter your choice: ");
+}
+
+void displayAdminMenu(void) {
+    clearScreen();
+    printf("+---------------------------------------------------+\n");
+    printf("|              ADMIN PANEL                         |\n");
+    printf("|---------------------------------------------------|\n");
+    printf("|  1. Add New Movie Show                           |\n");
+    printf("|  2. Update Show                                  |\n");
+    printf("|  3. Delete Show                                  |\n");
+    printf("|  4. View Booking History                         |\n");
+    printf("|  5. View Movie Schedule                          |\n");
+    printf("|  6. Back to Main Menu                            |\n");
+    printf("+---------------------------------------------------+\n");
+    printf("\nEnter your choice: ");
+}
+
+void displayUserMenu(void) {
+    clearScreen();
+    printf("+---------------------------------------------------+\n");
+    printf("|              USER PANEL                          |\n");
+    printf("|---------------------------------------------------|\n");
+    printf("|  1. Book Ticket                                  |\n");
+    printf("|  2. Cancel Ticket                                |\n");
+    printf("|  3. View All Shows                               |\n");
+    printf("|  4. View My Bookings                             |\n");
+    printf("|  5. Today's Schedule                             |\n");
+    printf("|  6. Back to Main Menu                            |\n");
+    printf("+---------------------------------------------------+\n");
+    printf("\nEnter your choice: ");
+}
+
+void displayMoviesByDate(void) {
+    Movie movies[MAX_MOVIES];
+    int count = 0;
+    char dateStr[20];
+    
+    clearScreen();
+    displayHeader("MOVIES BY DATE");
+    
+    getCurrentDate(dateStr);
+    printf("Today's Date: %s\n\n", dateStr);
+    
+    loadMovies(movies, &count);
+    
+    if (count == 0) {
+        printf("No movies found in the system.\n");
+        pressAnyKey();
+        return;
+    }
+    
+    printf("+----------------------------------------------------------------------------------------------------+\n");
+    printf("| Shows for Today                                                                                    |\n");
+    printf("+----------------------------------------------------------------------------------------------------+\n");
+    printf("| #  | Movie Name          | Show       | Time       | Available | Booking Status                    |\n");
+    printf("+----+---------------------+------------+------------+-----------+-----------------------------------|\n");
+    
+    int i, found = 0;
+    for (i = 0; i < count; i++) {
+        char movieDate[20];
+        sprintf(movieDate, "%04d-%02d-%02d", movies[i].year, movies[i].month, movies[i].day);
+        
+        if (strcmp(movieDate, dateStr) == 0 && movies[i].moviestatus == 1) {
+            char timeStr[20];
+            char status[50];
+            getShowTime(movies[i].show, timeStr);
+            getBookingBlockReason(&movies[i], status, sizeof(status));
+            
+            printf("| %-2d | %-19s | %-10s | %-10s | %-9d | %-33s |\n",
+                   found + 1, movies[i].moviename, getShowName(movies[i].show),
+                   timeStr, movies[i].totalSeats - movies[i].bookedSeats,
+                   isBookingAllowed(&movies[i]) ? "Available" : status);
+            found++;
+        }
+    }
+    
+    if (found == 0) {
+        printf("| No shows scheduled for today.                                                           |\n");
+    }
+    printf("+----------------------------------------------------------------------------------------------------+\n");
+    
+    pressAnyKey();
+}
+
+/* ---------- MAIN FUNCTION ---------- */
+
+int main(void) {
+    int choice;
+    
+    clearScreen();
+    printf("\n");
+    printf("+---------------------------------------------------+\n");
+    printf("|                                                   |\n");
+    printf("|     WELCOME TO MOVIE TICKET BOOKING SYSTEM        |\n");
+    printf("|                                                   |\n");
+    printf("|     Initializing System...                        |\n");
+    printf("|                                                   |\n");
+    printf("+---------------------------------------------------+\n");
+    
+    #ifdef _WIN32
+       // Sleep(1000);
+    #else
+        sleep(1);
+    #endif
+    
+    int movieFileReset = ensureMovieFileHeader();
+    int bookingFileReset = ensureBookingFileHeader();
+    
+    if (movieFileReset || bookingFileReset) {
+        printf("\n[INFO] Older data file(s) from a previous version were found.\n");
+        if (movieFileReset) {
+            printf("       Movie.dat backed up as 'Movie_old_backup.dat'; a fresh one was started.\n");
+        }
+        if (bookingFileReset) {
+            printf("       Tickets.dat backed up as 'Tickets_old_backup.dat'; a fresh one was started.\n");
+        }
+        pressAnyKey();
+    }
+    
+    do {
+        displayMainMenu();
+        if (scanf("%d", &choice) != 1) {
+            printf("Invalid input! Please enter a number.\n");
+            while (getchar() != '\n');
+            continue;
+        }
+        while (getchar() != '\n');
+        
+        switch (choice) {
+            
+            case 1: { // Admin Panel
+                if (!adminLogin()) {
+                    break;
+                }
+                int adminChoice;
+                do {
+                    displayAdminMenu();
+                    if (scanf("%d", &adminChoice) != 1) {
+                        printf("Invalid input! Please enter a number.\n");
+                        while (getchar() != '\n');
+                        continue;
+                    }
+                    while (getchar() != '\n');
+                    
+                    switch (adminChoice) {
+                        case 1: addNewMovie(); break;
+                        case 2: updateMovie(); break;
+                        case 3: deleteMovie(); break;
+                        case 4: displayBookingHistory(); break;
+                        case 5: displayMovieSchedule(); break;
+                        case 6: break;
+                        default: printf("\nInvalid choice!\n"); pressAnyKey();
+                    }
+                } while (adminChoice != 6);
+                break;
+            }
+            
+            case 2: { // User Panel
+                if (!userLogin()) {
+                    break;
+                }
+                int userChoice;
+                do {
+                    displayUserMenu();
+                    if (scanf("%d", &userChoice) != 1) {
+                        printf("Invalid input! Please enter a number.\n");
+                        while (getchar() != '\n');
+                        continue;
+                    }
+                    while (getchar() != '\n');
+                    
+                    switch (userChoice) {
+                        case 1: bookTicket(); break;
+                        case 2: cancelTicket(); break;
+                        case 3: displayAllMovies(); break;
+                        case 4: displayMyBookings(); break;
+                        case 5: displayMoviesByDate(); break;
+                        case 6: break;
+                        default: printf("\nInvalid choice!\n"); pressAnyKey();
+                    }
+                } while (userChoice != 6);
+                break;
+            }
+            
+            case 3: // Today's Schedule
+                displayMoviesByDate();
+                break;
+            
+            case 4: // View Show Timings
+                clearScreen();
+                displayHeader("SHOW TIMINGS");
+                displayShowTimings();
+                printf("\n+---------------------------------------------------+\n");
+                printf("| IMPORTANT:                                         |\n");
+                printf("| Bookings close 15 minutes before show start time.  |\n");
+                printf("+---------------------------------------------------+\n");
+                pressAnyKey();
+                break;
+            
+            case 5: // View Movie Schedule
+                displayMovieSchedule();
+                break;
+            
+            case 6:
+                clearScreen();
+                printf("\n+---------------------------------------------------+\n");
+                printf("|                                                   |\n");
+                printf("|     THANK YOU FOR USING OUR SYSTEM                |\n");
+                printf("|                                                   |\n");
+                printf("|     Have a Great Day!                             |\n");
+                printf("|                                                   |\n");
+                printf("+---------------------------------------------------+\n\n");
+                break;
+                
+            default:
+                printf("\n[ERROR] Invalid choice! Please try again.\n");
+                pressAnyKey();
+        }
+    } while (choice != 6);
+    
+    return 0;
+}
+
